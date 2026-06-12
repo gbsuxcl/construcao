@@ -9,9 +9,8 @@ PRODUTOS = [
 REQUEST_TIMEOUT = 30
 SLEEP_SECONDS = 5
 
-OUTPUT_DIR = "output"
+OUTPUT_DIR = "data\output"
 DATE_FIELD = "scraping_date"
-
 
 # JOLI
 JOLI_BASE_URL = "https://www.joli.com.br/api/catalog_system/pub/products/search"
@@ -34,9 +33,12 @@ LEROY_HEADERS = {
 
 
 # SODIMAC
+SODIMAC_BASE_URL = "https://www.sodimac.com.br/sodimac-br/search"
+
 SODIMAC_HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
 }
 
 SODIMAC_PAGE_SIZE = 48
+SODIMAC_SLEEP_SECONDS = 5

@@ -1,232 +1,117 @@
-import os
-import time
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
-from datetime import datetime
+from time import sleep
+
+from ingestion.core import config
+from ingestion.core.base_extractor import BaseScraper
+from ingestion.core.logger import get_logger
+from ingestion.core.decorators import log_execution
 
 
-PRODUTOS = [
-    "cimento",
-    "areia",
-    "desmolde",
-    "superplastificante",
-    "macrofibra"
-]
+class SodimacScraper(BaseScraper):
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0",
-    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-}
+    def __init__(self):
+        super().__init__("sodimac")
+        self.logger = get_logger("sodimac")
 
-PRODUTOS_POR_PAGINA = 48
-TEMPO_ESPERA = 5
+    @log_execution("sodimac")
+    def run(self):
 
-data = []
+        self.logger.info("Iniciando Sodimac scraper")
 
+        all_data = []
 
-for produto in PRODUTOS:
+        for produto in config.PRODUTOS:
 
-    print("\n" + "=" * 80)
-    print(f"Coletando produto: {produto}")
-    print("=" * 80)
+            self.logger.info(f"Coletando: {produto}")
 
-    pagina = 1
+            data = self.buscar_produto(produto)
 
-    while True:
+            all_data.extend(data)
 
-        url = (
-            "https://www.sodimac.com.br/"
-            f"sodimac-br/search?"
-            f"Ntt={produto}"
-            f"&page={pagina}"
-            f"&store=so_retail"
-        )
+            self.logger.info(f"{produto}: {len(data)} produtos coletados")
 
-        try:
+        df = pd.DataFrame(all_data)
 
-            response = requests.get(
-                url,
-                headers=HEADERS,
-                timeout=30
+        if not df.empty:
+            df.drop_duplicates(
+                subset=["search_term", "product_name", "brand", "product_url"],
+                inplace=True
             )
 
-            response.raise_for_status()
+        self.save("sodimac_products.csv", df)
 
-            soup = BeautifulSoup(
-                response.text,
-                "html.parser"
+        self.logger.info(f"Finalizado. Total: {len(df)}")
+
+    def buscar_produto(self, produto: str):
+
+        results = []
+        page = 1
+
+        while True:
+
+            url = (
+                f"{config.SODIMAC_BASE_URL}"
+                f"?Ntt={produto}"
+                f"&page={page}"
+                f"&store=so_retail"
             )
 
-            search_result = soup.find_all(
-                "div",
-                class_="search-results-4-grid"
-            )
-
-            quantidade_produtos = len(search_result)
-
-            print(
-                f"Página {pagina}: "
-                f"{quantidade_produtos} produtos"
-            )
-
-            # Não encontrou produtos
-            if quantidade_produtos == 0:
-
-                print(
-                    f"Fim da busca para '{produto}'"
+            try:
+                response = requests.get(
+                    url,
+                    headers=config.SODIMAC_HEADERS,
+                    timeout=config.REQUEST_TIMEOUT
                 )
 
-                break
+                response.raise_for_status()
 
-            for result in search_result:
+                soup = BeautifulSoup(response.text, "html.parser")
 
-                try:
+                items = soup.find_all("div", class_="search-results-4-grid")
 
-                    # Link
-                    link_tag = result.select_one(
-                        "a.pod-link"
-                    )
+                if not items:
+                    break
 
-                    product_url = (
-                        link_tag.get("href")
-                        if link_tag
-                        else None
-                    )
-
-                    # Nome do produto
-                    product_name_tag = result.select_one(
-                        "b.pod-subTitle"
-                    )
-
-                    product_name = (
-                        product_name_tag.get_text(
-                            strip=True
-                        )
-                        if product_name_tag
-                        else None
-                    )
-
-                    # Marca
-                    brand_tag = result.select_one(
-                        "b.pod-title"
-                    )
-
-                    brand = (
-                        brand_tag.get_text(
-                            strip=True
-                        )
-                        if brand_tag
-                        else None
-                    )
-
-                    # Preço atual
-                    price_tag = result.select_one(
-                        "span.copy10"
-                    )
-
-                    price = (
-                        price_tag.get_text(
-                            strip=True
-                        )
-                        if price_tag
-                        else None
-                    )
-
-                    # Preço riscado
-                    list_price_tag = result.select_one(
-                        "span.crossed"
-                    )
-
-                    list_price = (
-                        list_price_tag.get_text(
-                            strip=True
-                        )
-                        if list_price_tag
-                        else None
-                    )
-
-                    data.append({
-                        "source": "sodimac",
-                        "search_term": produto,
-                        "product_id": None,
-                        "product_name": product_name,
-                        "brand": brand,
-                        "category_id": None,
-                        "ean": None,
-                        "price": price,
-                        "list_price": list_price,
-                        "available_quantity": None,
-                        "product_url": product_url,
-                        "scraping_date": datetime.now()
-                    })
-
-                except Exception as e:
-
-                    print(
-                        f"Erro ao processar produto: {e}"
-                    )
-
-                    continue
-
-            # Última página
-            if quantidade_produtos < PRODUTOS_POR_PAGINA:
-
-                print(
-                    f"Última página encontrada: {pagina}"
+                self.logger.info(
+                    f"{produto} | página {page} | {len(items)} itens"
                 )
 
+                for item in items:
+                    results.append(self.parse_item(item, produto))
+
+                if len(items) < config.SODIMAC_PAGE_SIZE:
+                    break
+
+                page += 1
+                sleep(config.SODIMAC_SLEEP_SECONDS)
+
+            except Exception as e:
+                self.logger.error(f"Erro na página {page}: {e}")
                 break
 
-            pagina += 1
+        return results
 
-            print(
-                f"Aguardando {TEMPO_ESPERA}s..."
-            )
+    def parse_item(self, item, produto: str):
 
-            time.sleep(TEMPO_ESPERA)
+        link = item.select_one("a.pod-link")
+        name = item.select_one("b.pod-subTitle")
+        brand = item.select_one("b.pod-title")
+        price = item.select_one("span.copy10")
+        list_price = item.select_one("span.crossed")
 
-        except Exception as e:
-
-            print(
-                f"Erro na página {pagina}: {e}"
-            )
-
-            break
-
-
-df = pd.DataFrame(data)
-
-# Remove duplicados
-df = df.drop_duplicates(
-    subset=[
-        "search_term",
-        "product_name",
-        "brand",
-        "product_url"
-    ]
-)
+        return self.add_timestamp({
+            "source": "sodimac",
+            "search_term": produto,
+            "product_id": None,
+            "product_name": name.get_text(strip=True) if name else None,
+            "brand": brand.get_text(strip=True) if brand else None,
+            "price": price.get_text(strip=True) if price else None,
+            "list_price": list_price.get_text(strip=True) if list_price else None,
+            "product_url": link.get("href") if link else None
+        })
 
 
-os.makedirs(
-    "data/output",
-    exist_ok=True
-)
-
-output_file = (
-    "data/output/sodimac_products.csv"
-)
-
-df.to_csv(
-    output_file,
-    index=False,
-    encoding="utf-8-sig",
-    sep=";",
-    decimal="."
-)
-
-print("\n" + "=" * 80)
-print("Processo finalizado!")
-print(f"Produtos coletados: {len(df)}")
-print(f"Arquivo salvo em: {output_file}")
-print("=" * 80)
+if __name__ == "__main__":
+    SodimacScraper().run()

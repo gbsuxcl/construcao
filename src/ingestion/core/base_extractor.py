@@ -2,7 +2,7 @@ import time
 import pandas as pd
 from datetime import datetime
 import os
-from core import config
+from ingestion.core import config
 
 class BaseScraper:
 

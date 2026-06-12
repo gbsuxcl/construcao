@@ -1,146 +1,97 @@
-import os
-import time
 import requests
 import pandas as pd
-from datetime import datetime
 
-PRODUTOS = [
-    "cimento",
-    "areia",
-    "desmolde",
-    "superplastificante",
-    "macrofibra"
-]
+from ingestion.core import config
+from ingestion.core.base_extractor import BaseScraper
+from ingestion.core.logger import get_logger
+from ingestion.core.decorators import log_execution
 
-BASE_URL = "https://www.joli.com.br/api/catalog_system/pub/products/search"
 
-PAGE_SIZE = 50
-SLEEP_SECONDS = 5
+class JoliScraper(BaseScraper):
 
-data = []
+    def __init__(self):
+        super().__init__("joli")
+        self.logger = get_logger("joli")
 
-for produto in PRODUTOS:
+    @log_execution("joli")
+    def run(self):
 
-    print(f"\n{'=' * 80}")
-    print(f"Coletando produtos para: {produto}")
-    print(f"{'=' * 80}")
+        data = []
 
-    inicio = 0
+        for produto in config.PRODUTOS:
 
-    while True:
+            self.logger.info(f"Coletando: {produto}")
 
-        params = {
-            "ft": produto,
-            "_from": inicio,
-            "_to": inicio + PAGE_SIZE - 1
-        }
+            inicio = 0
 
-        try:
+            while True:
 
-            response = requests.get(
-                BASE_URL,
-                params=params,
-                timeout=30
-            )
+                params = {
+                    "ft": produto,
+                    "_from": inicio,
+                    "_to": inicio + config.JOLI_PAGE_SIZE - 1
+                }
 
-            print(
-                f"Requisição: {response.url}"
-            )
-
-            if not response.ok:
-                print(
-                    f"Erro HTTP {response.status_code} "
-                    f"para '{produto}'"
+                response = requests.get(
+                    config.JOLI_BASE_URL,
+                    params=params,
+                    timeout=config.REQUEST_TIMEOUT
                 )
-                break
 
-            products = response.json()
-
-            if not products:
-                print(
-                    f"Fim da paginação para '{produto}'"
-                )
-                break
-
-            print(
-                f"Página {inicio}-{inicio + PAGE_SIZE - 1}: "
-                f"{len(products)} produtos"
-            )
-
-            for product in products:
-
-                try:
-
-                    item = product["items"][0]
-
-                    if not item.get("sellers"):
-                        continue
-
-                    seller = item["sellers"][0]
-                    offer = seller.get("commertialOffer", {})
-
-                    data.append({
-                        "search_term": produto,
-                        "product_id": product.get("productId"),
-                        "product_name": product.get("productName"),
-                        "brand": product.get("brand"),
-                        "category_id": product.get("categoryId"),
-                        "ean": item.get("ean"),
-                        "price": offer.get("Price"),
-                        "list_price": offer.get("ListPrice"),
-                        "available_quantity": offer.get("AvailableQuantity"),
-                        "product_url": product.get("link"),
-                        "scraping_date": datetime.now()
-                    })
-
-                except (IndexError, KeyError, TypeError) as e:
-                    print(
-                        f"Erro ao processar produto: {e}"
+                if not response.ok:
+                    self.logger.error(
+                        f"HTTP {response.status_code} | produto={produto}"
                     )
-                    continue
+                    break
 
-            inicio += PAGE_SIZE
+                products = response.json()
 
-            print(
-                f"Dormindo {SLEEP_SECONDS}s..."
-            )
+                if not products:
+                    break
 
-            time.sleep(SLEEP_SECONDS)
+                for product in products:
 
-        except Exception as e:
+                    try:
+                        item = product["items"][0]
+                        seller = item["sellers"][0]
+                        offer = seller.get("commertialOffer", {})
 
-            print(
-                f"Erro na busca '{produto}': {e}"
-            )
-            break
+                        data.append(
+                            self.add_timestamp({
+                                "source": "joli",
+                                "search_term": produto,
+                                "product_id": product.get("productId"),
+                                "product_name": product.get("productName"),
+                                "brand": product.get("brand"),
+                                "price": offer.get("Price"),
+                                "list_price": offer.get("ListPrice"),
+                                "product_url": product.get("link")
+                            })
+                        )
 
-df = pd.DataFrame(data)
+                    except Exception as e:
+                        self.logger.error(
+                            f"Erro produto {produto}: {e}"
+                        )
 
-# Remove duplicados caso o mesmo produto apareça
-# em mais de uma busca
-if not df.empty:
+                inicio += config.JOLI_PAGE_SIZE
+                self.sleep()
 
-    df = df.drop_duplicates(
-        subset=["product_id"]
-    )
+        self.logger.info(f"Registros brutos: {len(data)}")
 
-os.makedirs(
-    "data/output",
-    exist_ok=True
-)
+        df = pd.DataFrame(data)
 
-output_file = "data/output/joli_products.csv"
+        self.logger.info(f"Registros no dataframe: {len(df)}")
 
-df.to_csv(
-    output_file,
-    index=False,
-    encoding="utf-8-sig",
-    sep=";",
-    decimal="."
-)
+        if not df.empty:
+            df = df.drop_duplicates(subset=["product_id"])
+        
+        self.save("joli_products.csv", df)
 
-print(f"\n{'=' * 80}")
-print("Processo finalizado!")
-print(f"Produtos únicos: {len(df)}")
-print(f"Arquivo salvo em: {output_file}")
-print(f"{'=' * 80}")
+        self.logger.info(f"Após remoção de duplicados: {len(df)}"
+        )
+
+if __name__ == "__main__":
+    JoliScraper().run()
+
+        

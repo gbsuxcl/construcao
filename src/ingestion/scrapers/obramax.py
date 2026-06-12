@@ -1,146 +1,120 @@
-import os
-import time
 import requests
 import pandas as pd
-from datetime import datetime
 
-PRODUTOS = [
-    "cimento",
-    "areia",
-    "desmolde",
-    "superplastificante",
-    "macrofibra"
-]
+from ingestion.core import config
+from ingestion.core.base_extractor import BaseScraper
+from ingestion.core.logger import get_logger
+from ingestion.core.decorators import log_execution
 
-BASE_URL = "https://www.obramax.com.br/api/catalog_system/pub/products/search"
 
-PAGE_SIZE = 50
-SLEEP_SECONDS = 5
+class ObramaxScraper(BaseScraper):
 
-data = []
+    def __init__(self):
+        super().__init__("obramax")
+        self.logger = get_logger("obramax")
 
-for produto in PRODUTOS:
 
-    print(f"\n{'=' * 80}")
-    print(f"Coletando produtos para: {produto}")
-    print(f"{'=' * 80}")
+    @log_execution("obramax")
+    def run(self):
 
-    inicio = 0
+        self.logger.info("Iniciando scraper Obramax")
 
-    while True:
+        todos_produtos = []
 
-        params = {
-            "ft": produto,
-            "_from": inicio,
-            "_to": inicio + PAGE_SIZE - 1
-        }
+        for produto in config.PRODUTOS:
 
-        try:
+            try:
+                self.logger.info(f"Coletando: {produto}")
+
+                produtos = self.buscar_produtos(produto)
+
+                todos_produtos.extend(produtos)
+
+                self.logger.info(
+                    f"{produto}: {len(produtos)} produtos coletados"
+                )
+
+            except Exception as e:
+                self.logger.error(
+                    f"Erro no produto {produto}: {e}"
+                )
+
+        df = pd.DataFrame(todos_produtos)
+
+        if not df.empty:
+            df.drop_duplicates(subset=["product_id"], inplace=True)
+
+        self.save("obramax_products.csv", df)
+
+        self.logger.info(f"Finalizado. Total: {len(df)} produtos")
+
+
+    def buscar_produtos(self, termo: str) -> list[dict]:
+
+        resultados = []
+        inicio = 0
+
+        while True:
+
+            params = {
+                "ft": termo,
+                "_from": inicio,
+                "_to": inicio + config.OBRAMAX_PAGE_SIZE - 1
+            }
 
             response = requests.get(
-                BASE_URL,
+                config.OBRAMAX_BASE_URL,
                 params=params,
-                timeout=30
-            )
-
-            print(
-                f"Requisição: {response.url}"
+                timeout=config.REQUEST_TIMEOUT
             )
 
             if not response.ok:
-                print(
-                    f"Erro HTTP {response.status_code} "
-                    f"para '{produto}'"
+                self.logger.error(
+                    f"HTTP {response.status_code} em {termo}"
                 )
                 break
 
             products = response.json()
 
             if not products:
-                print(
-                    f"Fim da paginação para '{produto}'"
-                )
                 break
-
-            print(
-                f"Página {inicio}-{inicio + PAGE_SIZE - 1}: "
-                f"{len(products)} produtos"
-            )
 
             for product in products:
 
                 try:
-
-                    item = product["items"][0]
-
-                    if not item.get("sellers"):
-                        continue
-
-                    seller = item["sellers"][0]
-                    offer = seller.get("commertialOffer", {})
-
-                    data.append({
-                        "search_term": produto,
-                        "product_id": product.get("productId"),
-                        "product_name": product.get("productName"),
-                        "brand": product.get("brand"),
-                        "category_id": product.get("categoryId"),
-                        "ean": item.get("ean"),
-                        "price": offer.get("Price"),
-                        "list_price": offer.get("ListPrice"),
-                        "available_quantity": offer.get("AvailableQuantity"),
-                        "product_url": product.get("link"),
-                        "scraping_date": datetime.now()
-                    })
-
-                except (IndexError, KeyError, TypeError) as e:
-                    print(
-                        f"Erro ao processar produto: {e}"
+                    resultados.append(
+                        self.parse_item(product, termo)
                     )
-                    continue
 
-            inicio += PAGE_SIZE
+                except Exception as e:
+                    self.logger.error(
+                        f"Erro ao processar item: {e}"
+                    )
 
-            print(
-                f"Dormindo {SLEEP_SECONDS}s..."
-            )
+            inicio += config.OBRAMAX_PAGE_SIZE
+            self.sleep()
 
-            time.sleep(SLEEP_SECONDS)
+        return resultados
 
-        except Exception as e:
 
-            print(
-                f"Erro na busca '{produto}': {e}"
-            )
-            break
+    def parse_item(self, product: dict, termo: str) -> dict:
 
-df = pd.DataFrame(data)
+        item = product["items"][0]
 
-# Remove duplicados caso o mesmo produto apareça
-# em mais de uma busca
-if not df.empty:
+        seller = item["sellers"][0]
+        offer = seller.get("commertialOffer", {})
 
-    df = df.drop_duplicates(
-        subset=["product_id"]
-    )
+        return self.add_timestamp({
+            "source": "obramax",
+            "search_term": termo,
+            "product_id": product.get("productId"),
+            "product_name": product.get("productName"),
+            "brand": product.get("brand"),
+            "price": offer.get("Price"),
+            "list_price": offer.get("ListPrice"),
+            "product_url": product.get("link")
+        })
 
-os.makedirs(
-    "data/output",
-    exist_ok=True
-)
 
-output_file = "data/output/obramax_products.csv"
-
-df.to_csv(
-    output_file,
-    index=False,
-    encoding="utf-8-sig",
-    sep=";",
-    decimal="."
-)
-
-print(f"\n{'=' * 80}")
-print("Processo finalizado!")
-print(f"Produtos únicos: {len(df)}")
-print(f"Arquivo salvo em: {output_file}")
-print(f"{'=' * 80}")
+if __name__ == "__main__":
+    ObramaxScraper().run()
